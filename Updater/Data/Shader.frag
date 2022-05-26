@@ -411,7 +411,8 @@ vec3 Text(vec2 uv)
 	print_pos += vec2(20.+cos(time*6.)*7.,sin(time*3.)*7.);
 	
 	RGB(sin(2.*time+uv.x*0.03)/2. +0.5, -sin(4.*time-uv.y*0.03)/2. +0.5, cos(5.*time+dot(cos(uv),sin(uv))/3.)/2. +0.5)
-		_B _M _P _ _1 _per _5 _per _7 _nl _t _h _a _n _k _s _ _t _o _ _a _l _l _ _m _e _m _b _e _r _s _ _nl _ _ _ _ _o _f _ _t _h _e _ _B _O _L _exc
+		_B _M _P _ _1 _per _5 _per _7 _nl _t _h _a _n _k _s _ _t _o _ _a _l _l _ _m _e _m _b _e _r _s _ _nl _ _ _ _ _o _f _ _t _h _e _ _B _O _L _exc _nl
+		_A _n _d _ _t _o _ _a _l _l _ _t _h _e _ _b _a _r _d _s _nl _ _ _a _r _o _u _n _d _ _t _h _e _ _w _o _r _l _d _exc
 		
     
     	return col;
