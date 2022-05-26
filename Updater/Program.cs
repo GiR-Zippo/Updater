@@ -170,7 +170,7 @@ void main(void)
 
             if (debug)
             {
-                modfile = @"Data\grookles_chips.xm";
+                modfile = @"Data\80616-industrial.xm";
                 shader = File.ReadAllText(@"Data\Shader.frag");
                 return new KeyValuePair<string, string>(shader, modfile);
             }

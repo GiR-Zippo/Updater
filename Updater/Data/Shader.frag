@@ -1,1084 +1,469 @@
 ﻿#version 330
-
-/*
- * Original shader from: https://www.shadertoy.com/view/XttBWX
- */
-
 #ifdef GL_ES
-precision highp float;
+precision mediump float;
 #endif
 
-// glslsandbox uniforms
 uniform float time;
+varying vec2 surfacePosition;
+#define time (time/2000) + length(surfacePosition)
+uniform vec2 mouse;
 uniform vec2 resolution;
 
-// shadertoy globals
-float iTime = 0.0;
-float nTime = 0.0;
-vec3  iResolution = vec3(0.0);
+#define ENABLE_HARD_SHADOWS // turn off to enable faster AO soft shadows 
+#define ENABLE_VIBRATION
 
-float horizon;
+//Text
+#define CHAR_SIZE vec2(6, 7)
+#define CHAR_SPACING vec2(6, 9)
 
-float shift_right(float v, float amt) {
-	v = floor(v) + 0.5;
-	return floor(v * exp2(-amt));
+#define DOWN_SCALE 4.0
+
+vec2 res = resolution.xy / DOWN_SCALE;
+vec2 start_pos = vec2(0);
+vec2 print_pos = vec2(0);
+vec2 print_pos_pre_move = vec2(0);
+vec3 text_color = vec3(1);
+float hash(float x);
+
+float linenum = 0.;
+
+
+// Parameters for a shitty computer
+#define RAY_STEPS 60
+#define SHADOW_STEPS 12
+#define LIGHT_COLOR vec3(.85,.9,1.)
+#define AMBIENT_COLOR vec3(.3,.9,1.)
+#define FLOOR_COLOR vec3(1.,.7,.9)
+#define ENERGY_COLOR vec3(1.,.7,.4)
+#define BRIGHTNESS .9
+#define GAMMA 2.1
+#define SATURATION .9
+#define ENABLE_POSTPROCESS
+
+
+#define detail .00005
+#define t time*.1
+
+
+vec3 lightdir=normalize(vec3(0.8,-0.3,-1.));
+vec3 ambdir=normalize(vec3(0.,0.,1.));
+const vec3 origin=vec3(0.,3.11,0.);
+vec3 energy=vec3(0.01);
+#ifdef ENABLE_VIBRATION
+float vibration=sin(mouse.x*1000.)*.0013;
+#else
+float vibration=0.;
+#endif
+float det=0.0;
+vec3 pth1;
+
+float fnoo() {
+	return sin(time) * 0.5 + 0.5;
 }
 
-float shift_left(float v, float amt) {
-	return floor(v * exp2(amt) + 0.5);
+mat2 rot(float a) {
+	return mat2(cos(a),sin(a),-sin(a),cos(a));	
 }
 
-float mask_last(float v, float bits) {
-	return mod(v, shift_left(1.0, bits));
-}
-float extract_bits(float v, float from, float n) {
-	return mask_last(shift_right(v, from), n);
+
+vec3 path(float ti) {
+return vec3(sin(ti),.3-sin(ti*.632)*.3,cos(ti*.5))*.5;
 }
 
-float tex(float val, float j) {
-	float sign = val > 0.0 ? 0.0 : 1.0;
-	val = abs(val);
-	float exponent = floor(log2(val));
-	float biased_exponent = exponent + 63.0;
-	float mantissa = ((val * exp2(-exponent)) - 1.0) * 8388608.0;
+float Sphere(vec3 p, vec3 rd, float r){//A RAY TRACED SPHERE
+	float b = dot( -p, rd );
+	float inner = b * b - dot( p, p ) + r * r;
+	if( inner < 0.0 ) return -1.0;
+	return b - sqrt( inner );
+}
 
-	float index = j * 2.0;
-	if (j == 0.0) {
-		return sign + mod(biased_exponent, 2.0) * 2.0;
-	} else if (j < 4.){
-		index -= 1.;
-		return extract_bits(biased_exponent, index, 2.0);
-	} else {
-		index -= 7.;
-		return extract_bits(mantissa, index, 2.0);
+vec2 de(vec3 pos) {
+	float hid=0.;
+	vec3 tpos=pos;
+	tpos.xz=abs(.5-mod(tpos.xz,1.));
+	vec4 p=vec4(tpos,1.);
+	float y=max(0.,.35-abs(pos.y-3.35))/.35;
+	for (int i=0; i<5; i++) {//LOWERED THE ITERS
+		p.xyz = abs(p.xyz)-vec3(-0.02,1.98,-0.02);
+		p=p*(2.0+vibration*y)/clamp(dot(p.xyz,p.xyz),.4,1.)-vec4(0.5,1.,0.4,0.);
+		p.xz*=mat2(-0.416*fnoo(),-0.91,0.91,-0.416*fnoo());
 	}
+	float fl=pos.y-3.013;
+	float fr=(length(max(abs(p.xyz)-vec3(0.1,5.0,0.1),vec3(0.0)))-0.05)/p.w;//RETURN A RRECT
+	//float fr=length(p.xyz)/p.w;
+	float d=min(fl,fr);
+	d=min(d,-pos.y+3.95);
+	if (abs(d-fl)<.001) hid=1.;
+	return vec2(d,hid);
 }
 
-float ch(mat4 m, float c, vec2 uv) {
-	if (max(abs(uv.x), abs(uv.y)) < .5) {
-		float i = floor(uv.x * 16.) + 8.;
-		float j = floor(uv.y * 16.) + 8.;
-		vec4 v = m[3];
-		if (i < 8.) {
-			v = (i < 4.) ? m[0] : m[1];
-		} else if (i < 12.) {
-			v = m[2];
+
+vec3 normal(vec3 p) {
+	vec3 e = vec3(0.0,det,0.0);
+	
+	return normalize(vec3(
+			de(p+e.yxx).x-de(p-e.yxx).x,
+			de(p+e.xyx).x-de(p-e.xyx).x,
+			de(p+e.xxy).x-de(p-e.xxy).x
+			)
+		);	
+}
+
+float shadow(vec3 pos, vec3 sdir) {//THIS ONLY RUNS WHEN WITH HARD SHADOWS
+	float sh=1.0;
+	float totdist =2.0*det;
+	float dist=10.;
+	float t1=Sphere((pos-.005*sdir)-pth1,-sdir,0.015);
+	if (t1>0. && t1<.5) {
+		vec3 sphglowNorm=normalize(pos-t1*sdir-pth1);
+		sh=1.-pow(max(.0,dot(sphglowNorm,sdir))*1.2,3.);
+	} 
+		for (int steps=0; steps<SHADOW_STEPS; steps++) {
+			if (totdist<.6 && dist>detail) {
+				vec3 p = pos - totdist * sdir;
+				dist = de(p).x;
+				sh = min( sh, max(50.*dist/totdist,0.0) );
+				totdist += max(.01,dist);
+			}
 		}
-		i = mod(i, 4.);
-		if (i < 2.) {
-			if (i==0.) return tex(v.x, j);
-			return tex(v.y, j);
-		} else {
-			if (i==2.) return tex(v.z, j);
-			return tex(v.w, j);
+	
+    return clamp(sh,0.1,1.0);
+}
+
+
+float calcAO( const vec3 pos, const vec3 nor ) {
+	float aodet=detail*40.;
+	float totao = 0.0;
+    float sca = 14.0;
+    for( int aoi=0; aoi<5; aoi++ ) {
+        float hr = aodet*float(aoi*aoi);
+        vec3 aopos =  nor * hr + pos;
+        float dd = de( aopos ).x;
+        totao += -(dd-hr)*sca;
+        sca *= 0.7;
+    }
+    return clamp( 1.0 - 5.0*totao, 0., 1.0 );
+}
+
+float texture(vec3 p) {
+	p=abs(.5-fract(p*10.));
+	vec3 c=vec3(3.);
+	float es, l=es=0.;
+	for (int i = 0; i < 10; i++) { 
+			p = abs(p + c) - abs(p - c) - p; 
+			p/= clamp(dot(p, p), .0, 1.);
+			p = p* -1.5 + c;
+			if ( mod(float(i), 2.) < 1. ) { 
+				float pl = l;
+				l = length(p);
+				es+= exp(-1. / abs(l - pl));
+			}
+	}
+	return es;
+}
+
+vec3 light(in vec3 p, in vec3 dir, in vec3 n, in float hid) {//PASSING IN THE NORMAL
+	#ifdef ENABLE_HARD_SHADOWS
+		float sh=shadow(p, lightdir);
+	#else
+		float sh=calcAO(p,-2.5*lightdir);//USING AO TO MAKE VERY SOFT SHADOWS
+	#endif
+	float ao=calcAO(p,n);
+	float diff=max(0.,dot(lightdir,-n))*sh;
+	float y=3.35-p.y;
+	vec3 amb=max(.5,dot(dir,-n))*.5*AMBIENT_COLOR;
+	if (hid<.5) {
+		amb+=max(0.2,dot(vec3(0.,1.,0.),-n))*FLOOR_COLOR*pow(max(0.,.2-abs(3.-p.y))/.2,1.5)*2.;
+		amb+=energy*pow(max(0.,.4-abs(y))/.4,2.)*max(0.2,dot(vec3(0.,-sign(y),0.),-n))*2.;
+	}
+	vec3 r = reflect(lightdir,n);
+	float spec=pow(max(0.,dot(dir,-r))*sh,10.);
+	vec3 col;
+	float energysource=pow(max(0.,.04-abs(y))/.04,4.)*2.;
+	if (hid>1.5) {col=vec3(1.); spec=spec*spec;}
+	else{
+		float k=texture(p)*.23+.2; 
+		k=min(k,1.5-energysource);
+		col=mix(vec3(k,k*k,k*k*k),vec3(k),.3);
+		if (abs(hid-1.)<.001) col*=FLOOR_COLOR*1.3;
+	}
+	col=col*(amb+diff*LIGHT_COLOR)+spec*LIGHT_COLOR;	
+	if (hid<.5) { 
+		col=max(col,energy*2.*energysource);
+	}
+	col*=min(1.,ao+length(energy)*.5*max(0.,.1-abs(y))/.1);
+	return col;
+}
+
+vec3 raymarch(in vec3 from, in vec3 dir) 
+
+{
+	float ey=mod(t*.5,1.);
+	float glow,eglow,ref,sphdist,totdist=glow=eglow=ref=sphdist=0.;
+	vec2 d=vec2(1.,0.);
+	vec3 p, col=vec3(0.);
+	vec3 origdir=dir,origfrom=from,sphNorm;
+	
+	//FAKING THE SQUISHY BALL BY MOVING A RAY TRACED BALL
+	vec3 wob=cos(dir*500.0*length(from-pth1)+(from-pth1)*250.+time*10.)*0.0005;
+	float t1=Sphere(from-pth1+wob,dir,0.015);
+	float tg=Sphere(from-pth1+wob,dir,0.02);
+	if(t1>0.){
+		ref=1.0;from+=t1*dir;sphdist=t1;
+		sphNorm=normalize(from-pth1+wob);
+		dir=reflect(dir,sphNorm);
+	} 
+	else if (tg>0.) { 
+		vec3 sphglowNorm=normalize(from+tg*dir-pth1+wob);
+		glow+=pow(max(0.,dot(sphglowNorm,-dir)),5.);
+	};
+	
+	for (int i=0; i<RAY_STEPS; i++) {
+		if (d.x>det && totdist<3.0) {
+			p=from+totdist*dir;
+			d=de(p);
+			det=detail*(1.+totdist*60.)*(1.+ref*5.);
+			totdist+=d.x; 
+			energy=ENERGY_COLOR*(1.5+sin(time*20.+p.z*10.))*.25;
+			if(d.x<0.015)glow+=max(0.,.015-d.x)*exp(-totdist);
+			if (d.y<.5 && d.x<0.03){//ONLY DOING THE GLOW WHEN IT IS CLOSE ENOUGH
+				float glw=min(abs(3.35-p.y-ey),abs(3.35-p.y+ey));//2 glows at once
+				eglow+=max(0.,.03-d.x)/.03*
+				(pow(max(0.,.05-glw)/.05,5.)
+				+pow(max(0.,.15-abs(3.35-p.y))/.15,8.))*1.5;
+			}
 		}
 	}
-	return c;
+	float l=pow(max(0.,dot(normalize(-dir.xz),normalize(lightdir.xz))),2.);
+	l*=max(0.2,dot(-dir,lightdir));
+	vec3 backg=.5*(1.2-l)+LIGHT_COLOR*l*.7;
+	backg*=AMBIENT_COLOR;
+	if (d.x<=det) {
+		vec3 norm=normal(p-abs(d.x-det)*dir);//DO THE NORMAL CALC OUTSIDE OF LIGHTING (since we already have the sphere normal)
+		col=light(p-abs(d.x-det)*dir, dir, norm, d.y)*exp(-.2*totdist*totdist); 
+		col = mix(col, backg, 1.0-exp(-1.*pow(totdist,1.5)));
+	} else { 
+		col=backg;
+	}
+	vec3 lglow=LIGHT_COLOR*pow(l,30.)*.5;
+	col+=glow*(backg+lglow)*1.3;
+	col+=pow(eglow,2.)*energy*.015;
+	col+=lglow*min(1.,totdist*totdist*.3);
+	if (ref>0.5) {
+		vec3 sphlight=light(origfrom+sphdist*origdir,origdir,sphNorm,2.);
+		col=mix(col*.3+sphlight*.7,backg,1.0-exp(-1.*pow(sphdist,1.5)));
+	}
+	return col; 
 }
 
-vec3 copper(in vec3 c) {
-    vec3 rgb = clamp( abs(mod(c.x*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0 );
-	rgb = rgb*rgb*(3.0-2.0*rgb);
-	return c.z * mix( vec3(1.0), rgb, c.y) * vec3(1.0,1.0,2.5);
+vec3 move(inout mat2 rotview1,inout mat2 rotview2) {
+	vec3 go=path(t);
+	vec3 adv=path(t+.7);
+	vec3 advec=normalize(adv-go);
+	float an=atan(advec.x,advec.z);
+	rotview1=mat2(cos(an),sin(an),-sin(an),cos(an));
+		  an=advec.y*1.7;
+	rotview2=mat2(cos(an),sin(an),-sin(an),cos(an));
+	return go;
 }
 
-float N21(vec2 p){
-	p = fract(p*vec2(234.334,125.64));
-	p+=dot(p,p+25.34);
-	return fract(p.x*p.y);
-}
+//Textsection
+//Text coloring
+#define HEX(i) text_color = mod(vec3(i / 65536,i / 256,i),vec3(256.0))/255.0;
+#define RGB(r,g,b) text_color = vec3(r,g,b);
 
-vec2 N22(vec2 p){
-	float n = N21(p);
-	return vec2(n,N21(p+n));
-}
+#define STRWIDTH(c) (c * CHAR_SPACING.x)
+#define STRHEIGHT(c) (c * CHAR_SPACING.y)
+#define BEGIN_TEXT(x,y) print_pos = floor(vec2(x,y)); start_pos = floor(vec2(x,y)); linenum = 0.;
 
-vec2 starPos(vec2 id,vec2 offs){
-	vec2 n = N22(id+offs);
-	return offs+(n)*.8;
-}
+//Automatically generated from the sprite sheet here: http://uzebox.org/wiki/index.php?title=File:Font6x8.png
+#define _ col+=char(vec2(0.0,0.0),uv);
+#define _spc col+=char(vec2(0.0,0.0),uv)*text_color;
+#define _exc col+=char(vec2(276705.0,32776.0),uv)*text_color;
+#define _quo col+=char(vec2(1797408.0,0.0),uv)*text_color;
+#define _hsh col+=char(vec2(10738.0,21134484.0*hash(time)),uv)*text_color;
+#define _dol col+=char(vec2(538883.0,19976.0),uv)*text_color;
+#define _pct col+=char(vec2(1664033.0,68006.0),uv)*text_color;
+#define _amp col+=char(vec2(545090.0,174362.0),uv)*text_color;
+#define _apo col+=char(vec2(798848.0,0.0),uv)*text_color;
+#define _lbr col+=char(vec2(270466.0,66568.0),uv)*text_color;
+#define _rbr col+=char(vec2(528449.0,33296.0),uv)*text_color;
+#define _ast col+=char(vec2(10471.0,1688832.0),uv)*text_color;
+#define _crs col+=char(vec2(4167.0,1606144.0),uv)*text_color;
+#define _per col+=char(vec2(0.0,1560.0),uv)*text_color;
+#define _dsh col+=char(vec2(7.0,1572864.0),uv)*text_color;
+#define _com col+=char(vec2(0.0,1544.0),uv)*text_color;
+#define _lsl col+=char(vec2(1057.0,67584.0),uv)*text_color;
+#define _0 col+=char(vec2(935221.0,731292.0),uv)*text_color;
+#define _1 col+=char(vec2(274497.0,33308.0),uv)*text_color;
+#define _2 col+=char(vec2(934929.0,1116222.0),uv)*text_color;
+#define _3 col+=char(vec2(934931.0,1058972.0),uv)*text_color;
+#define _4 col+=char(vec2(137380.0,1302788.0),uv)*text_color;
+#define _5 col+=char(vec2(2048263.0,1058972.0),uv)*text_color;
+#define _6 col+=char(vec2(401671.0,1190044.0),uv)*text_color;
+#define _7 col+=char(vec2(2032673.0,66576.0),uv)*text_color;
+#define _8 col+=char(vec2(935187.0,1190044.0),uv)*text_color;
+#define _9 col+=char(vec2(935187.0,1581336.0),uv)*text_color;
+#define _col col+=char(vec2(195.0,1560.0),uv)*text_color;
+#define _scl col+=char(vec2(195.0,1544.0),uv)*text_color;
+#define _les col+=char(vec2(135300.0,66052.0),uv)*text_color;
+#define _equ col+=char(vec2(496.0,3968.0),uv)*text_color;
+#define _grt col+=char(vec2(528416.0,541200.0),uv)*text_color;
+#define _que col+=char(vec2(934929.0,1081352.0),uv)*text_color;
+#define _ats col+=char(vec2(935285.0,714780.0),uv)*text_color;
+#define _A col+=char(vec2(935188.0,780450.0),uv)*text_color;
+#define _B col+=char(vec2(1983767.0,1190076.0),uv)*text_color;
+#define _C col+=char(vec2(935172.0,133276.0),uv)*text_color;
+#define _D col+=char(vec2(1983764.0,665788.0),uv)*text_color;
+#define _E col+=char(vec2(2048263.0,1181758.0),uv)*text_color;
+#define _F col+=char(vec2(2048263.0,1181728.0),uv)*text_color;
+#define _G col+=char(vec2(935173.0,1714334.0),uv)*text_color;
+#define _H col+=char(vec2(1131799.0,1714338.0),uv)*text_color;
+#define _I col+=char(vec2(921665.0,33308.0),uv)*text_color;
+#define _J col+=char(vec2(66576.0,665756.0),uv)*text_color;
+#define _K col+=char(vec2(1132870.0,166178.0),uv)*text_color;
+#define _L col+=char(vec2(1065220.0,133182.0),uv)*text_color;
+#define _M col+=char(vec2(1142100.0,665762.0),uv)*text_color;
+#define _N col+=char(vec2(1140052.0,1714338.0),uv)*text_color;
+#define _O col+=char(vec2(935188.0,665756.0),uv)*text_color;
+#define _P col+=char(vec2(1983767.0,1181728.0),uv)*text_color;
+#define _Q col+=char(vec2(935188.0,698650.0),uv)*text_color;
+#define _R col+=char(vec2(1983767.0,1198242.0),uv)*text_color;
+#define _S col+=char(vec2(935171.0,1058972.0),uv)*text_color;
+#define _T col+=char(vec2(2035777.0,33288.0),uv)*text_color;
+#define _U col+=char(vec2(1131796.0,665756.0),uv)*text_color;
+#define _V col+=char(vec2(1131796.0,664840.0),uv)*text_color;
+#define _W col+=char(vec2(1131861.0,699028.0),uv)*text_color;
+#define _X col+=char(vec2(1131681.0,84130.0),uv)*text_color;
+#define _Y col+=char(vec2(1131794.0,1081864.0),uv)*text_color;
+#define _Z col+=char(vec2(1968194.0,133180.0),uv)*text_color;
+#define _lsb col+=char(vec2(925826.0,66588.0),uv)*text_color;
+#define _rsl col+=char(vec2(16513.0,16512.0),uv)*text_color;
+#define _rsb col+=char(vec2(919584.0,1065244.0),uv)*text_color;
+#define _pow col+=char(vec2(272656.0,0.0),uv)*text_color;
+#define _usc col+=char(vec2(0.0,62.0),uv)*text_color;
+#define _a col+=char(vec2(224.0,649374.0),uv)*text_color;
+#define _b col+=char(vec2(1065444.0,665788.0),uv)*text_color;
+#define _c col+=char(vec2(228.0,657564.0),uv)*text_color;
+#define _d col+=char(vec2(66804.0,665758.0),uv)*text_color;
+#define _e col+=char(vec2(228.0,772124.0),uv)*text_color;
+#define _f col+=char(vec2(401543.0,1115152.0),uv)*text_color;
+#define _g col+=char(vec2(244.0,665474.0),uv)*text_color;
+#define _h col+=char(vec2(1065444.0,665762.0),uv)*text_color;
+#define _i col+=char(vec2(262209.0,33292.0),uv)*text_color;
+#define _j col+=char(vec2(131168.0,1066252.0),uv)*text_color;
+#define _k col+=char(vec2(1065253.0,199204.0),uv)*text_color;
+#define _l col+=char(vec2(266305.0,33292.0),uv)*text_color;
+#define _m col+=char(vec2(421.0,698530.0),uv)*text_color;
+#define _n col+=char(vec2(452.0,1198372.0),uv)*text_color;
+#define _o col+=char(vec2(228.0,665756.0),uv)*text_color;
+#define _p col+=char(vec2(484.0,667424.0),uv)*text_color;
+#define _q col+=char(vec2(244.0,665474.0),uv)*text_color;
+#define _r col+=char(vec2(354.0,590904.0),uv)*text_color;
+#define _s col+=char(vec2(228.0,114844.0),uv)*text_color;
+#define _t col+=char(vec2(8674.0,66824.0),uv)*text_color;
+#define _u col+=char(vec2(292.0,1198868.0),uv)*text_color;
+#define _v col+=char(vec2(276.0,664840.0),uv)*text_color;
+#define _w col+=char(vec2(276.0,700308.0),uv)*text_color;
+#define _x col+=char(vec2(292.0,1149220.0),uv)*text_color;
+#define _y col+=char(vec2(292.0,1163824.0),uv)*text_color;
+#define _z col+=char(vec2(480.0,1148988.0),uv)*text_color;
+#define _lpa col+=char(vec2(401542.0,66572.0),uv)*text_color;
+#define _bar col+=char(vec2(266304.0,33288.0),uv)*text_color;
+#define _rpa col+=char(vec2(788512.0,1589528.0),uv)*text_color;
+#define _tid col+=char(vec2(675840.0,0.0),uv)*text_color;
+#define _lar col+=char(vec2(8387.0,1147904.0),uv)*text_color;
+#define _gay col+=char(vec2(133120.0,0.0),uv)*text_color;
+#define _nl print_pos = start_pos - (++linenum)*vec2(0,CHAR_SPACING.y);
 
-const mat4 A = mat4(1.19218981354e-07, 2050.70800781, -527189.25, -537941.25, -578901.25, -2261.33300781, -6.75373598824e-07, 6.74907482789e-07, 1.53595161289e-19, 1.31626876509e-07, 2261.33300781, -537941.25, -527189.25, -2050.70800781, -4.76875925415e-07, 4.76839545627e-07);
-const mat4 B = mat4(1.21692806943e-07, 2229.33300781, -709973.25, -742741.25, -742741.25, -742741.25, -740050.75, -740180.75, -742741.25, -742741.25, -742741.25, -578869.25, -2261.20800781, -4.8910192163e-07, 4.79313371216e-07, 1.19354950812e-07);
-const mat4 C = mat4(1.08984897264e-19, 4.75968708891e-10, 1.29764259782e-07, 2261.33300781, 2773.33300781, -742741.25, -742709.25,-742573.25, -742573.25, -742701.25, -2773.20800781, -2261.20800781, 5.18911519976e-07, 4.86773501507e-07, 1.19830161793e-07, 4.65670724203e-10);
-const mat4 D = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -742741.25, -740011.25, -742061.25, -742741.25, -2773.33300781, -2261.33300781, 5.19057039128e-07, 4.87391957904e-07, 1.19868815318e-07, 4.66267580101e-10, 1.08429006043e-19);
-const mat4 E = mat4(4.75362527119e-10, 557.333251953, 709973.25, -742741.25, -742741.25, -742741.25, -742741.25, -742227.25, -742227.25, -742227.25, -742227.25, -742091.25, -709291.25, -2218.66699219, -4.86616613671e-07, 4.7683727189e-07);
-const mat4 F = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2901.33300781, -6.75051182952e-07, 6.75051182952e-07, 1.53488842731e-19, 1.53488842731e-19, 1.5346071859e-19, 1.53453997747e-19, 1.53446966712e-19, 1.19140477987e-19, 1.10670148515e-19, 1.08949612841e-19);
-const mat4 G = mat4(1.08984871414e-19, 4.75968708891e-10, 1.29764259782e-07, 2261.33300781, 2773.33300781, -742741.25, -742573.25,-742059.25, -742099.25, -742101.25, -2898.83300781, -2898.83300781, 5.25925543116e-07, 4.86780777464e-07, 1.19830161793e-07, 4.65663618776e-10);
-const mat4 H = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -709973.25, -2219.33300781, -5.1671906931e-07, 6.45707245894e-07, 2901.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16573550158e-07, 4.8677122777e-07);
-const mat4 I = mat4(1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.29104734015e-07, 2770.66699219, -742741.25, -742741.25, -742741.25, -742741.25, -742741.25, -2770.66699219, -5.16573550158e-07, 4.86732574245e-07, 1.08420217249e-19, 1.08420217249e-19);
-const mat4 J = mat4(1.08420217249e-19, 4.65663618776e-10, 1.19211847505e-07, 2048.05175781, 2048.05175781, -524301.25, -524291.25,-524299.25, -567981.25, -709973.25, -2901.33300781, -2901.33300781, 6.75519231663e-07, 6.45716795589e-07, 1.29143387539e-07, 4.75362527119e-10);
-const mat4 K = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -709973.25, -2219.33300781, -4.87391957904e-07, 5.19057039128e-07, 2261.33300781, -742741.25, -742709.25, -742573.25, -2770.66894531, -5.165662742e-07, 4.86616613671e-07);
-const mat4 L = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -709973.25, -567981.25, -535213.25, -524301.25, -524301.25, -524301.25, -2048.05175781, -4.76847390019e-07, 4.76839545627e-07, 1.19209431659e-07, 1.08420217249e-19);
-const mat4 M = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.19047375747e-07, 4.87389684167e-07, 1.29761843937e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16573550158e-07, 4.8677122777e-07);
-const mat4 N = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.19056470694e-07, 4.87391957904e-07, 1.29182183173e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16573550158e-07, 4.8677122777e-07);
-const mat4 O = mat4(1.08984897264e-19, 4.75968708891e-10, 1.29764259782e-07, 2261.33300781, 2773.33300781, -742741.25, -742581.25,-742061.25, -742581.25, -742741.25, -2773.33300781, -2261.33300781, 5.19057039128e-07, 4.87391957904e-07, 1.19830161793e-07, 4.66267580101e-10);
-const mat4 P = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -742741.25, -2901.33300781, -6.73190356792e-07, 6.75053001942e-07, 1.53595161289e-19, 1.53595161289e-19, 1.19713429808e-19, 1.19713429808e-19, 1.11241420125e-19, 1.08984871414e-19, 1.08561251543e-19);
-const mat4 Q = mat4(1.08984897264e-19, 4.75968708891e-10, 1.29764259782e-07, 2261.33300781, 2773.33300781, -742741.25, -742581.25,-742061.25, -2900.70800781, -2773.33300781, -578901.25, -570709.25, -535891.25, -2058.66699219, 4.77457547277e-07, 1.19209289551e-07);
-const mat4 R = mat4(1.21692806943e-07, 2229.33300781, -709973.25, -742741.25, -742741.25, -742741.25, -2901.33300781, -6.7319081154e-07, 6.75053570376e-07, 2901.33300781, 742741.25, -578901.25, -578893.25, -2101.16894531, -4.79320647173e-07, 4.77455728287e-07);
-const mat4 S = mat4(4.75326999982e-10, 1.29725606257e-07, 2261.17675781, 2773.30175781, -742733.25, -742739.25, -742739.25, -742741.25, -742229.25, -742229.25, -742613.25, -2772.83300781, 2260.70800781, 5.18438582731e-07, 1.21690987953e-07, 4.66230276608e-10);
-const mat4 T = mat4(1.17419942313e-19, 1.46669048773e-19, 1.53557808914e-19, 1.53557808914e-19, 1.68841012282e-07, 2901.33300781, -742741.25, -742741.25, -742741.25, -2901.33300781, -6.7536404913e-07, 6.7536404913e-07, 1.53557808914e-19, 1.46675666218e-19, 1.17453029538e-19, 1.10670148515e-19);
-const mat4 U = mat4(1.17455226736e-19, 6.30582808192e-10, 1.68879807916e-07, 2901.33300781, 2901.33300781, -709973.25, -567989.25,-535213.25, -567989.25, -709973.25, -2901.33300781, -2901.33300781, 6.75519231663e-07, 6.45716795589e-07, 1.29143387539e-07, 4.75362527119e-10);
-const mat4 V = mat4(1.17454683899e-19, 1.4681680391e-19, 1.53595161289e-19, 6.59686638649e-10, 1.68879807916e-07, 2773.33300781, -568021.25, -535221.25, -568021.25, -2773.33300781, -6.75519231663e-07, 6.75519117976e-07, 1.68879665807e-07, 6.30573482319e-10, 1.17455226736e-19, 1.10678833911e-19);
-const mat4 W = mat4(1.29143387539e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16583213539e-07, 4.86809881295e-07, 1.29145803385e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16573550158e-07, 4.8677122777e-07);
-const mat4 X = mat4(1.29105188762e-07, 2770.54394531, -742573.25, -742709.25, -742741.25, -2773.33300781, -5.19057039128e-07, 4.87391957904e-07, 1.29764259782e-07, 2773.33300781, -742741.25, -742709.25, -742573.25, -2770.66894531, -5.165662742e-07, 4.86733028993e-07);
-const mat4 Y = mat4(1.17446412093e-19, 1.46781545336e-19, 1.53585933055e-19, 1.5359296409e-19, 1.6887921106e-07, 2773.33300781, -570709.25, -535893.25, -570709.25, -2773.33300781, -6.7551684424e-07, 6.75509568282e-07, 1.53586450043e-19, 1.46783613288e-19, 1.17454683899e-19, 1.1067676596e-19);
-const mat4 Z = mat4(5.03860619894e-10, 692.503173828, 741901.25, -741941.25, -742101.25, -742229.25, -742741.25, -742741.25, -742741.25, -742739.25, -742731.25, -742699.25, -578731.25, -2090.62792969, -4.79281993648e-07, 4.76837158203e-07);
-const mat4 _0 = mat4(1.08455372425e-19, 1.0899316907e-19, 4.75968708891e-10, 1.29764259782e-07, 2773.33300781, -2773.33300781, -742069.25, -740013.25, -742069.25, -2773.33300781, -2773.33300781, -5.19057039128e-07, 4.87391957904e-07, 1.1983925674e-07, 4.66267580101e-10, 1.08429006043e-19);
-const mat4 _1 = mat4(1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.10670148515e-19, 1.29725464149e-07, 2773.33300781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16573550158e-07, 4.8677122777e-07, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19);
-const mat4 _2 = mat4(1.21654608165e-07, 2226.55175781, -578741.25, -709845.25, -742613.25, -742229.25, -742229.25, -742741.25, -742739.25, -742739.25, -742731.25, -709963.25, -578859.25, -2228.66699219, -4.86769408781e-07, 4.79311097479e-07);
-const mat4 _3 = mat4(4.75213313145e-10, 1.29601914978e-07, 2260.67675781, 2772.67675781, -742605.25, -742227.25, -742227.25, -742741.25, -742741.25, -742741.25, -742741.25, -2773.33300781, 2261.20800781, 5.18904244018e-07, 1.21692806943e-07, 4.68051042368e-10);
-const mat4 _4 = mat4(1.08455501672e-19, 4.66305327684e-10, 4.68238114948e-10, 4.75968819913e-10, 5.06891639773e-10, 5.14167597387e-10, 1.68872531958e-07, 2900.70800781, -742741.25, -742741.25, -742741.25, -2773.33300781, -5.16583213539e-07, 4.86773501507e-07, 4.65812832751e-10, 1.08420760086e-19);
-const mat4 _5 = mat4(5.04459252149e-10, 1.61419677625e-07, 2901.30175781, 2901.30175781, -742733.25, -742731.25, -742731.25, -742739.25, -742229.25, -742229.25, -742229.25, -2898.83300781, -2898.83300781, 6.43243083687e-07, 5.16544446327e-07, 1.21654608165e-07);
-const mat4 _6 = mat4(1.08984897264e-19, 4.75968708891e-10, 1.29764259782e-07, 2261.33300781, 2773.33300781, -742741.25, -742731.25,-742219.25, -742227.25, -742229.25, -2899.33300781, -2763.33300781, 5.16612317369e-07, 4.86780777464e-07, 1.19218981354e-07, 4.65670724203e-10);
-const mat4 _7 = mat4(1.17419942313e-19, 1.46669048773e-19, 1.53557808914e-19, 1.68838624859e-07, 2900.63574219, -742573.25, -742613.25, -742741.25, -742741.25, -2901.33300781, -6.75519117976e-07, 6.7551684424e-07, 6.59648891066e-10, 1.46677837567e-19, 1.17454683899e-19, 1.10670148515e-19);
-const mat4 _8 = mat4(4.75326999982e-10, 1.29726061004e-07, 2261.20800781, -709973.25, -742741.25, -742741.25, -742738.75, -740178.75, -740181.25, -742741.25, -742741.25, -709973.25, -2261.20800781, 5.18904244018e-07, 1.21692806943e-07, 4.68051042368e-10);
-const mat4 _9 = mat4(1.08982700065e-19, 1.10810769219e-19, 1.29761843937e-07, 2261.32324219, -709971.25, -742739.25, -742227.25, -740179.25, -742229.25, -742741.25, -2773.33300781, -2261.33300781, 5.19057039128e-07, 4.87391957904e-07, 1.19830161793e-07, 4.66267580101e-10);
-const mat4 tdot = mat4(1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.19209431659e-07, 2048.01074219, -524291.25, -524291.25, -524291.25, -2048.01074219, -4.76837726637e-07, 4.7683727189e-07, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19);
-const mat4 comma = mat4(1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420760086e-19, 1.19211819083e-07, 0.000122073397506, -524301.25, -2048.05175781, -4.76847390019e-07, 4.76839545627e-07, 1.19209431659e-07, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19);
-const mat4 bang = mat4(1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.29142932792e-07, 2773.29199219, -742739.25, -742739.25, -742739.25, -2773.29199219, -5.16573550158e-07, 4.86770773023e-07, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19, 1.08420217249e-19);
-const mat4 qm = mat4(1.08420217249e-19, 1.10643678735e-19, 1.17869928566e-19, 1.19676491024e-19, 1.68838738546e-07, 2900.66699219,-742219.25, -742739.25, -742739.25, -2901.32324219, -6.75509568282e-07, 6.45678142064e-07, 1.17984493081e-19, 1.10678420321e-19, 1.08982700065e-19, 1.08420217249e-19);
-
-#define CHAR_W (17./16.)
-#define _(cc) col = ch(cc, col, uv); uv.x -= CHAR_W;
-#define SP uv.x -= CHAR_W;
-
-const float text_width = 65. * CHAR_W;
-
-float scroll(vec2 uv)
+//Extracts bit b from the given number.
+float extract_bit(float n, float b)
 {
-	float zoom = 4.0;
-	uv *= zoom;
-
-    uv.x = mod(uv.x +4*nTime, text_width) - .5;
-	uv.y -= 2.0*horizon;
-	uv.y += sin(-.65*uv.x*(uv.x+cos(nTime*2.+uv.y*10.)) + nTime * 24.) * -.04;
-
-	float col = 0.;
-
-	_(B)_(M)_(P)_(tdot)_(_1)_(tdot)_(_5)_(tdot)_(_7)_(tdot)_(G)_(R)_(E)_(E)_(T)_(S)_(tdot)_(T)_(O)_(tdot)_(A)_(K)_(O)_(comma)_(A)_(L)_(I)_(N)_(A)_(comma)
-    _(M)_(A)_(S)_(O)_(N)_(tdot)_(A)_(N)_(D)_(tdot)_(T)_(H)_(E)_(tdot)_(B)_(O)_(L)_(tdot)_(T)_(R)_(O)_(U)_(P)_(E)_(tdot)_(bang)
-
-	return pow(col,3.)*1.66*(sin(nTime)*0.5+0.7);
+	b = clamp(b,-1.0,22.0);
+	return floor(mod(floor(n / pow(2.0,floor(b))),2.0));   
 }
 
-// --------[ Original ShaderToy begins here ]---------- //
-// Created by EvilRyu
-// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
-
-#define PI 3.1415926535
-#define FAR 30.0
-
-vec2 hash22(vec2 p)
+//Returns the pixel at uv in the given bit-packed sprite.
+float sprite(vec2 spr, vec2 size, vec2 uv)
 {
-    float f=p.x+p.y*37.0;
-    return fract(cos(f)*vec2(10003.579, 37049.7));
+	uv = floor(uv);
+	float bit = (size.x-uv.x-1.0) + uv.y * size.x;  
+	bool bounds = all(greaterThanEqual(uv,vec2(0)))&& all(lessThan(uv,size)); 
+	return bounds ? extract_bit(spr.x, bit - 21.0) + extract_bit(spr.y, bit) : 0.0;
 }
 
-float hash13(vec3 p)
+//Prints a character and moves the print position forward by 1 character width.
+vec3 char(vec2 ch, vec2 uv)
 {
-    p=fract(p * vec3(5.3983, 5.4472, 6.9371));
-    p += dot(p.yzx, p.xyz + vec3(21.5351, 14.3137, 15.3219));
-    return fract(p.x * p.y * p.z * 95.4337);
-}
-
-mat2 rot(float t)
-{
-    float c=cos(t);
-    float s=sin(t);
-    return mat2(c,-s,s,c);
-}
-
-float smin(float a, float b, float k)
-{
-    float h=clamp(0.5 + 0.5*(b-a)/k, 0.0, 1.0);
-    return mix(b, a, h) - k*h*(1.0-h);
+	float px = sprite(ch, CHAR_SIZE, uv - print_pos);
+	print_pos.x += CHAR_SPACING.x;
+	return vec3(px);
 }
 
 
-float smax(float a, float b, float k)
+vec3 Text(vec2 uv)
 {
-    return smin(a, b, -k);
-}
-
-
-vec2 line(vec3 pos, vec3 a, vec3 b)
-{
-    vec3 pa=pos-a;
-    vec3 ba=b-a;
-   
-    float h=clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
+    	vec3 col = vec3(0.0);
+    	
+    	vec2 center_pos = vec2(res.x/2.0 - STRWIDTH(20.0)/2.0,res.y/1.5 - STRHEIGHT(1.0)/2.0);
+       	
+    	BEGIN_TEXT(center_pos.x,center_pos.y)
+	print_pos += vec2(20.+cos(time*6.)*7.,sin(time*3.)*7.);
+	
+	RGB(sin(2.*time+uv.x*0.03)/2. +0.5, -sin(4.*time-uv.y*0.03)/2. +0.5, cos(5.*time+dot(cos(uv),sin(uv))/3.)/2. +0.5)
+		_B _M _P _ _1 _per _5 _per _7 _nl _t _h _a _n _k _s _ _t _o _ _a _l _l _ _m _e _m _b _e _r _s _ _nl _ _ _ _ _o _f _ _t _h _e _ _B _O _L _exc
+		
     
-    return vec2(length(pa-h*ba), h);
+    	return col;
 }
 
-float line(vec3 pos, vec3 a, vec3 b, float r)
+float hash(float x)
 {
-    vec3 pa=pos-a;
-    vec3 ba=b-a;
-   
-    float h=clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
-    
-    return length(pa-h*ba)-r;
-}
-
-float line(vec2 pos, vec2 a, vec2 b, float r)
-{
-    vec2 pa=pos-a;
-    vec2 ba=b-a;
-   
-    float h=clamp(dot(pa,ba)/dot(ba,ba), 0.0, 1.0);
-    
-    return length(pa-h*ba)-r;
-}
-
-float torus(vec3 p, vec2 t)
-{
-  vec2 q=vec2(length(p.xz)-t.x,p.y);
-  return length(q)-t.y;
-}
-
-float sphere(vec3 p)
-{
-    return length(p)-0.5;
-}
-
-float cylinder(vec3 p, vec2 h)
-{
-  vec2 d=abs(vec2(length(p.xz),p.y))-h;
-  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
-}
-
-float box(vec3 p, vec3 b)
-{
-  vec3 d=abs(p)-b;
-  return length(max(d,0.0))
-         + min(max(d.x,max(d.y,d.z)),0.0); 
-}
-
-float prism(vec3 p, vec2 h)
-{
-    vec3 q = abs(p);
-    return max(q.z-h.y,max(q.x*0.866025+p.y*0.5,-p.y)-h.x*0.5);
-}
-
-float ellipsoid(vec3 p, vec3 r)
-{
-    float k0=length(p/r);
-    float k1=length(p/(r*r));
-    return k0*(k0-1.0)/k1;
-}
-
-float rbox(vec3 p, vec3 b, float r)
-{
-  vec3 d=abs(p)-b;
-  return length(max(d,0.0)) - r
-         + min(max(d.x,max(d.y,d.z)),0.0);
-}
-
-vec3 swing(vec3 p)
-{
-    p.xy*=rot(0.15*sin(1.5*iTime));
-
-    p+=vec3(0.5*sin(1.5*iTime),0.,-0.3+2.*iTime);
-    return p;
-}
-
-// for bounding sphere
-vec3 inverse_swing(vec3 p)
-{
-    p.xy*=rot(-0.15*sin(1.5*iTime));
-
-    p-=vec3(0.5*sin(1.5*iTime),0.,-0.3+2.*iTime);
-    return p;
-}
-
-#define HEAD 1
-#define BODY 2
-#define NOSE 3
-#define HAND 4
-#define BELL 5
-// machine
-#define BASE 6
-#define CONTROL 7
-#define CONTROL_FRONT 8
-#define FUEL 9
-#define HANDLE1 10
-#define HANDLE2 11
-#define SOFA 12
-#define LIGHT 13
-
-int obj_id, machine_id;
-
-void body(vec3 p, inout float d0)
-{
-    float d1=line(p+vec3(0.,.6,0.),vec3(0),vec3(0.,0.2,0.),0.32);
-    if(d1<d0) obj_id=BODY;
-    d0=smin(d0,d1,0.03);
-}
-
-void brace(vec3 p, inout float d0)
-{
-    float d2=torus(p+vec3(0.,.4,0.),vec2(0.31,0.03));
-    if(d2<d0) {obj_id=NOSE;d0=d2;}
-}
-
-void legs(vec3 p, inout float d0)
-{
-    vec3 q=vec3(abs(p.x)-.18,p.y,p.z);
-    float d3=line(q+vec3(0,.95,0.),vec3(0),vec3(0.,0.2,0.),0.15);
-    d0=smin(d0,d3,0.13);
-    
-    // feet
-    q.x=abs(p.x)-0.2;
-    float d4=torus(q+vec3(0.,1.05,0.),vec2(0.08,0.09));
-    if(d4<d0) {obj_id=HAND;d0=d4;}
-}
-
-void arms(vec3 p, inout float d0)
-{
-    vec2 d5=line(p+vec3(-.28,0.5,0.),vec3(0),vec3(0.27,0.25,0.));
-    d5.x=d5.x-0.1*(1.-.6*d5.y);
-    if(d5.x<d0) obj_id=BODY;
-    d0=smin(d0,d5.x,.02);
-    d5.x=length(p+vec3(-.6,0.2,0.))-0.09;
-    if(d5.x<d0) {obj_id=HAND;d0=d5.x;}
-    
-    d5=line(p+vec3(.28,0.5,0.),vec3(0),.9*vec3(-0.27,-0.25,0.));
-    d5.x=d5.x-0.1*(1.-.6*d5.y);
-    if(d5.x<d0){obj_id=BODY;d0=d5.x;}
-    d5.x=length(p+vec3(.55,0.75,0.))-0.08;
-    if(d5.x<d0) {obj_id=HAND;d0=d5.x;}
-}
-
-void nose_tail(vec3 p, inout float d0)
-{
-    float d6=length(p+vec3(0.,-0.15,0.5))-0.05;
-    if(d6<d0) {obj_id=NOSE;d0=d6;}
-    
-    // tail
-    float d7=line(p+vec3(0.,0.77,-0.1),vec3(0),vec3(0.,-0.1,0.25),0.01);
-    float dt=length(p+vec3(0.,0.87,-0.35))-0.04;
-    if(dt<d0) {obj_id=NOSE;d0=dt;}
-    if(d7<d0) {obj_id=BODY;d0=d7;}
-
-}
-
-void bag(vec3 p, inout float d0)
-{
-    vec3 q=p;
-    q.yz*=rot(0.14);
-    float d8=cylinder(vec3(q.x,q.z+.16,abs(q.y+0.55)), vec2(0.1,.19))-0.05;
-    float d9=box(q+vec3(0.,.1,.0),vec3(1.,.44,1.));
-    d8=smax(-d9,d8,.02);
-    d0=smin(d0,d8,0.01);
-    
-    // bell
-    float d10=length(p+vec3(0.,0.46,0.36))-0.06;
-    float d11=torus(p+vec3(0.,0.46,0.36),vec2(0.06,0.009));
-    d10=min(d10,d11);
-    if(d10<d0) {obj_id=BELL;d0=d10;}
-}
-
-void mouth(vec3 p, inout float d0)
-{
-    vec3 q=p;
-    
-    p.yz*=rot(0.2);
-    float d12=cylinder(vec3(p.x,p.z+.6,abs(p.y-0.11)), vec2(0.25,.19))-0.05;
-    float d13=box(p+vec3(0.,-1.11,.0),vec3(1.,1.,1.));
-    d12=smax(-d13,d12,.06);
-    if(-d12>d0) obj_id=NOSE;
-    d0=smax(-d12,d0,.03); 
-    float dt=length(vec3(abs(p.x)-.05,p.y+.18,p.z+.2))-0.2;
-    if(dt<d0) {obj_id=NOSE;d0=dt;}
-    
-    
-    q.x=abs(q.x);
-    
-    vec2 d5=line(q+vec3(0.,-0.03,0.41),vec3(0),vec3(0.27,-0.01,-0.02));
-    //if(d14<d0) obj_id=NOSE;
-    d5.x-=0.07+0.01*(1.-d5.y);
-    d0=smin(d0,d5.x,0.01);
-}
-
-float doraemon(vec3 p)
-{
-    p=swing(p);
-    
-    obj_id=HEAD;
-    float d0=length(p)-0.5;
-    
-    body(p,d0);
-    brace(p,d0);
-    legs(p,d0);
-    arms(p,d0);
-    nose_tail(p,d0);
-    bag(p,d0);
-    mouth(p,d0);
-    return d0;
-}
-
-void main_control(vec3 p, inout float d0)
-{
-    float d2=box(p+vec3(0.,-0.4,.9), vec3(.87,.4, .2));    
-    if(d2<d0){machine_id=CONTROL;d0=d2;}
-    float d3=prism(vec3(p.z+1.,p.y-0.24,p.x), vec2(0.4,0.87));
-    if(d3<d0){machine_id=CONTROL_FRONT;d0=d3;}
-    
-    float d4=box(p+vec3(0.,-0.8,.85),vec3(0.8,0.2,0.2));
-    d0=max(-d4,d0);
-    
-    float d5=cylinder(p+vec3(-0.5,-0.7,.8),vec2(0.015,0.2));
-    if(d5<d0){machine_id=CONTROL;d0=d5;}
-    
-    float d6=length(p+vec3(-0.5,-0.88,.8))-0.05;
-    if(d6<d0) {machine_id=HANDLE1; d0=d6;}
-}
-
-void lamp(vec3 p, inout float d0)
-{
-    float d7=cylinder(p+vec3(-1.17,-1.,.8),vec2(0.025,1.));
-    float d8=line(p+vec3(-1.17,-2.,.8),vec3(0.),vec3(-0.35,0.35,0.),0.025);
-    d8=min(d7,d8);
-    if(d8<d0){machine_id=CONTROL;d0=d8;}
-    
-    vec3 q=p;
-    q.xy*=rot(0.8);
-    float d9=ellipsoid(q+vec3(1.32,-2.22,.8),vec3(0.25,0.07,0.2));
-    if(d9<d0){machine_id=LIGHT;d0=d9;}
-}
-
-void handles(vec3 p, inout float d0)
-{
-    float d=cylinder(vec3(p.x+1.35,p.z-1.2, p.y-.1),vec2(0.3,.25));
-    d=max(d,-box(p+vec3(1.65,-.2,-1.2),vec3(0.3,0.4,0.3)));
-    d=max(d,-box(p+vec3(1.25,.4,-1.2),vec3(0.3,0.4,0.3)));
-    if(d<d0){machine_id=CONTROL;d0=d;}
-    
-    p=p+vec3(1.15,-.3,-1.1);
-    
-    for(int i=0;i<3;++i)
-    {
-        d=line(p,vec3(0),vec3(0.1,0.2,0.),0.01);
-        d0=min(d0,d);
-        d=length(p+vec3(-0.1,-0.2,0.))-0.04;
-        if(d<d0){machine_id=HANDLE2;d0=d;}
-        p.z-=0.11;
-    }
-}
-
-void sofa(vec3 p, inout float d0)
-{
-    float d12=rbox(p+vec3(0.,-.5,-.8),vec3(0.6,0.5,0.04), 0.05);
-    float d13=rbox(p+vec3(0.,-.15,-.4),vec3(0.6,0.15,0.3), 0.05);
-    d13=smin(d12,d13,0.2);  
-    if(d13<d0){machine_id=SOFA;d0=d13;}
-}
-
-float timemachine(vec3 p)
-{
-    p=swing(p+vec3(0,0,0));p.y+=1.15;
-    
-    machine_id=BASE;
-    
-    float d0=box(p+vec3(0.,0.02,0.), vec3(1.5,0.06,1.8));
-    
-    main_control(p,d0);
-    lamp(p,d0);
-    handles(p,d0);
-    sofa(p,d0);
-    
-    p.x=abs(p.x)-1.17;
-    float d1=line(p+vec3(0.,-0.1,1.45),vec3(0),vec3(0.,0.,1.5),0.2);
-    if(d1<d0) {machine_id=FUEL; d0=d1;}
-    return d0;
+	return fract(fract(x) * 1234.56789 * fract(fract(-x) * 1234.56789));	
 }
 
 
-vec2 fold(vec2 p, float a)
+void main()
 {
-    p.x=abs(p.x);
-    vec2 n = vec2(cos(a),sin(a));
-    for(int i = 0; i < 3; ++i)
-    {
-        p -= 2.*min(0.,dot(p,n))*n;
-        n = normalize(n-vec2(1.,0.));
-    }
-    return p;
-}
-
-vec3 path(float p)
-{
-    return vec3(sin(p*0.05)*cos(p*0.025)*18., 0.,0.);
-}
-
-/// from Klem's Olympian: https://www.shadertoy.com/view/XltyRf
-vec3 tunnel(vec3 rd, float pos, float speed) 
-{
-    const float max_r = 5.;
-    vec3 col;//=vec3(1.);
-    for (float r=1.0;r<max_r;r+=1.0) 
-    {
-        // calculate where the ray intersects several fixed radius cylinders
-        // using cylindrical coordinates
-        // (phi, r, z)
-        // phi=arctan(rd.y/rd.x)
-        // r=r
-        // length(rd.xy) / r = rd.z / z ==> z=rd.z*r/length(rd.xy)
-        float phi=atan(rd.x, rd.y);
-        float z=rd.z*r/length(rd.xy);
-        if(r<1.5)col=vec3(abs(z)*.005);
-        // adjust the uv acoording to cylinder size and position
-        vec2 uv=vec2(phi*r, pos+z);
-        uv.x+=1.717*hash13(vec3(floor(uv),r))*r;
-        
-        vec2 cell_center=floor(uv)+0.5;
-        cell_center+=hash22(cell_center+vec2(0.,r))-.5;
-
-        vec2 size=vec2(.01);
-        size.y+=speed/r;
-        size.y/=sin(atan(r/abs(z)));
-        
-        //float d=(length((uv-cell_center)/size)-1.)*size.y;
-        //col+=vec3(1,.9,.6)*smoothstep(0.105,-0.105,d)/(.5*r*r+.3*z*z);
-
-        
-        float redshift=0.01+speed/r;
-        cell_center.y-=redshift;
-        for (int i=0; i<3; i++) 
-        {
-            cell_center.y+=redshift;
-            
-            // draw stars
-            vec2 p=uv-cell_center;
-            float d=(length(p/size)-1.0)*size.y;
-            float dist=(r*r+z*z);
-            col[i]+=smoothstep(0.02, -0.02, d)/dist;
-        }
-        
-    }
-    return 3.*col;
-}
+	pth1 = path(t+.3)+origin+vec3(0.,.01,0.);
+	vec2 uv = gl_FragCoord.xy / resolution.xy*2.-1.;
+	vec2 uv2=uv;
+#ifdef ENABLE_POSTPROCESS
+	uv*=1.+pow(length(uv2*uv2*uv2*uv2),4.)*.07;
+#endif
+	uv.y*=resolution.y/resolution.x;
+	vec2 mouse=(mouse.xy/resolution.xy-.5)*3.;
+	if (mouse.x<1.) mouse=vec2(0.);
+	mat2 rotview1, rotview2;
+	vec3 from=origin+move(rotview1,rotview2);
+	vec3 dir=normalize(vec3(uv*.8,1.));
+	dir.yz*=rot(mouse.y);
+	dir.xz*=rot(mouse.x);
+	dir.yz*=rotview2;
+	dir.xz*=rotview1;
+	vec3 color=raymarch(from,dir); 
+	color=clamp(color,vec3(.0),vec3(1.));
+	color=pow(color,vec3(GAMMA))*BRIGHTNESS;
+	color=mix(vec3(length(color)),color,SATURATION);
+#ifdef ENABLE_POSTPROCESS
+	vec3 rain=vec3(0.);//pow(texture2D(iChannel0,uv2+iGlobalTime*7.25468).rgb,vec3(1.5));
+	color=mix(rain,color,clamp(time*.5-.5,0.,1.));
+	color*=1.-pow(length(uv2*uv2*uv2*uv2)*1.1,6.);
+	uv2.y *= resolution.y / 360.0;
+	color.r*=(.5+abs(.5-mod(uv2.y     ,.021)/.021)*.5)*1.5;
+	color.g*=(.5+abs(.5-mod(uv2.y+.007,.021)/.021)*.5)*1.5;
+	color.b*=(.5+abs(.5-mod(uv2.y+.014,.021)/.021)*.5)*1.5;
+	color*=.9+rain*.35;
+#endif
+	gl_FragColor = vec4(color,1.);
 
 
-float get_ao(vec3 p, vec3 n)
-{
-    float r=0.0, w=1.0, d;
-    for(float i=1.; i<5.0+1.1; i++)
-    {
-        d=i/5.0;
-        r+=w*(d-min(doraemon(p+n*d),timemachine(p+n*d)));
-        w*=0.5;
-    }
-    return 1.0-clamp(r,0.0,1.0);
-}
-
-
-
-vec3 material_doraemon(vec3 rd, vec3 pos, vec3 nor)
-{
-    vec3 col=vec3(0);
-    float d; 
-    pos=swing(pos);
-    
-    if(obj_id==HEAD)
-    {
-        col=vec3(0.,0.5,1.0); 
-        if(pos.z<0.&&length(vec2(pos.x*0.9,pos.y+0.05))<0.38)col=vec3(0.9);
-        
-        // eyes
-        if(pos.z<0.)
-        {
-            vec2 p=vec2(abs(pos.x)-0.1,pos.y*.7-0.2);
-            float r=length(p.xy);
-            col*=pow(1.-smoothstep(0.08,0.09,r)*smoothstep(0.1,0.09,r),1.);
-            if(r<0.085) col=vec3(1.);
-            p=vec2(abs(pos.x)-0.06, pos.y-0.26);
-            r=length(p);
-            p=vec2(abs(pos.x)-0.06, pos.y-0.26);
-            float r1=length(p);
-            col*=pow(1.-smoothstep(0.0,0.025,r)*smoothstep(0.03,0.025,r),7.0);
-            
-            // beards
-            if(pos.y>0.&&pos.y<0.11)
-            col*=smoothstep(0.,0.01,abs(pos.x));
-            col*=smoothstep(0.,0.01, line(vec2(abs(pos.x)-0.16,pos.y), vec2(0.,0.14),vec2(0.14,0.18),0.001));
-            col*=smoothstep(0.,0.01, line(vec2(abs(pos.x)-0.16,pos.y+0.04), vec2(0.,0.14),vec2(0.15,0.15),0.001));
-            col*=smoothstep(0.,0.01, line(vec2(abs(pos.x)-0.16,pos.y+0.08), vec2(0.,0.14),vec2(0.15,0.13),0.001));
-        }
-    }
-    else if(obj_id==BODY)
-    {
-        col=vec3(0.,0.5,1.0); 
-        if(pos.z<0.&&length(vec2(pos.x,pos.y+.6))<.22)col=vec3(0.9);
-    }
-    else if(obj_id==NOSE)
-        col=vec3(.4,0.,0.);
-    else if(obj_id==BELL)
-        col=vec3(1.2,0.7,0.);
-    else if(obj_id==HAND)
-        col=vec3(.9);
-    else if(obj_id==BASE)
-        col=vec3(0.05,0.1,0.2);
-    else if(obj_id==CONTROL)
-        col=vec3(.9,.7,.5);
-    else if(obj_id==CONTROL_FRONT)
-    {
-        col=vec3(.9,.7,.5);
-        // pos.y -1.x -> -0.7
-        col=mix(vec3(1.,0.2,0.),col,pow(smoothstep(0.,0.04, line(vec2(pos.x,pos.y), vec2(-0.5,-0.8),vec2(0.5,-0.8),0.001)),40.));
-        col=mix(vec3(1.,0.2,0.),col,pow(smoothstep(0.,0.04, line(vec2(pos.x,pos.y), vec2(-0.5,-0.9),vec2(0.5,-0.9),0.001)),40.));
-        col=mix(vec3(1.,0.2,0.),col,pow(smoothstep(0.,0.04, line(vec2(pos.x,pos.y), vec2(-0.5,-1.),vec2(0.5,-1.),0.001)),40.));
-        
-    }
-    else if(obj_id==HANDLE1)
-        col=vec3(0.,0.1,0.3);
-    else if(obj_id==FUEL)
-        col=vec3(0.01,0.04,0.1);
-    else if(obj_id==HANDLE2||obj_id==SOFA)
-        col=vec3(0.1,0.,0.04);
-    else if(obj_id==LIGHT)
-    {
-        // pixel light
-        vec2 frp=abs(fract(pos.xz*10.));
-        frp=pow(frp, vec2(4.));
-        float edge=max(0.,1.-(frp.x+frp.y));
-        vec2 flp=floor(pos.xz*10.);
-        float k=dot(sin(flp+cos(flp.yx*2.+iTime*2.)),vec2(.5));
-        col=nor.y<0.? 10.*edge*vec3(pow(k,.7)*2., 4.*pow(k, 1.5), pow(k,2.)) : vec3(.9,.7,.5);
-    }
-    return col;
-}
-
-vec3 lighting_doraemon(vec3 rd, vec3 pos, float ps,float hitinfo, float t)
-{
-    vec3 l1dir=normalize(vec3(1.0,2.,-1.));
-    vec3 l1col=vec3(1.,0.8,0.8);
-    
-    vec3 e=vec3(0.5*ps,0.0,0.0); 
-    vec3 nor;
-
-    if(hitinfo<.9)
-        nor=normalize(vec3(doraemon(pos+e.xyy)-doraemon(pos-e.xyy), 
-                          doraemon(pos+e.yxy)-doraemon(pos-e.yxy), 
-                          doraemon(pos+e.yyx)-doraemon(pos-e.yyx)));
-    else
-        nor=normalize(vec3(timemachine(pos+e.xyy)-timemachine(pos-e.xyy), 
-                          timemachine(pos+e.yxy)-timemachine(pos-e.yxy), 
-                          timemachine(pos+e.yyx)-timemachine(pos-e.yyx)));
-    
-    if(timemachine(pos)<doraemon(pos))obj_id=machine_id;
-    if(t>FAR&&obj_id==LIGHT)obj_id=CONTROL; // avoid weird artifacts, should find a bettwe way
-    
-    vec3 mate=material_doraemon(rd,pos,nor);
-    float ao=get_ao(pos,nor);
-    float dif=max(0.0,dot(nor,l1dir));
-    float bac=max(0.0,dot(nor,-l1dir));
-    float spe=max(0.0, pow(clamp(dot(l1dir, reflect(rd, nor)), 0.0, 1.0), 32.0));
-
-    vec3 lin=6.0*dif*l1col*ao;
-    lin+=1.*bac*l1col;
-    lin+=3.*spe*vec3(1.);
-    return lin*0.2*mate;
-}
-
-float pixel_size = 0.;
-
-vec4 intersect_doraemon(vec3 ro, vec3 rd, out vec3 hitinfo)
-{
-    hitinfo=vec3(0.,0.,1.);
-    float d_first=100.0, t_first=0.0;
-    float old_d=1000.0;
-    float d_max=1000.0, t_max=0.0;
-    float t=1.0;
-    float d=100.0;
-    float hitwho=0.,old_hitwho=0.;
-    
-    for(int i=0; i<64; ++i) 
-    {
-        hitwho=0.;
-        // splitting them is just for not crashing my windows laptop....
-        d=doraemon(ro+rd*t);
-        float d1=timemachine(ro+rd*t);
-        if(d1<d){hitwho=1.;d=d1;}
-
-        
-        if(d_first == 100.0)  // the first edge
-        {
-            hitinfo.x=hitwho;
-            if(d>old_d) 
-            {
-                if(old_d<pixel_size * (t-old_d))
-                {
-                    d_first=old_d;
-                    t_first=t-old_d;
-                    hitinfo.x=old_hitwho;
-                }
-            }
-            old_d=d;
-            old_hitwho=hitwho;
-        }
-        if(d<d_max) // save the max occluder
-        { 
-            t_max=t; 
-            d_max=d;
-            hitinfo.y=hitwho;
-        }  
-        
-        if(d<0.00001 || t>FAR)
-            break;
-        t += d;
-        hitinfo.z=t;
-    }
-    return vec4(t_max, d_max, t_first, d_first);
-}
-
-float bounding_sphere(in vec3 ro, in vec3 rd, in vec4 sph)
-{
-    vec3 p=sph.xyz;
-    p=inverse_swing(p);
-    float t=-1.0;
-    vec3  ce=ro-p;
-    float b=dot(rd, ce);
-    float c=dot(ce, ce)-sph.w*sph.w;
-    float h=b*b - c;
-    if(h>0.0)
-    {
-        t=-b-sqrt(h);
-    }
-    
-    return t;
-}
-
-vec3 render_doraemon(vec3 ro, vec3 rd, vec3 bg)
-{
-    float t=bounding_sphere(ro,rd,vec4(0.,-0.35,0.,2.5));
-    if(t<=0. || t>1000.)
-        return bg;
-    
-    // first hit, max hit, t
-    vec3 hitinfo;
-    vec4 res=intersect_doraemon(ro,rd,hitinfo);
-    
-    float d_max, t_max, d_first, t_first;
-    t_max=res.x;
-    d_max=res.y;
-    t_first=res.z;
-    d_first=res.w;
-    vec3 nor,pos;
-    
-    vec3 col=bg;
-    
-    if(d_max < pixel_size*t_max) 
-    {
-        pos=ro+rd*t_max;
-        col=mix(lighting_doraemon(rd, pos, pixel_size*t_max,hitinfo.y, hitinfo.z), col, 
-                  clamp(d_max/(pixel_size * t_max), 0.0, 1.0));
-    }
-    float ratio=0.0;
-
-    if(d_first==100.0 || t_max==t_first)
-    {
-        t_first=t_max;
-        d_first=d_max;
-        ratio=0.5;
-    }
-    
-    pos=ro+rd*t_first;
-    col=mix(lighting_doraemon(rd, pos, pixel_size*t_first,hitinfo.x, hitinfo.z),
-              col, clamp(ratio+d_first/(pixel_size*t_first), 0.0, 1.0));
-    
-    return col;
-}
-
-
-#define CITY_MENGER 1
-#define CITY_ROAD 2
-
-#define VOXEL_GAP 0.1
-
-const mat3 ma=mat3(0.6,0.,0.8,
-                   0.,1.,0.,
-                   -0.8,0.,0.6);
-
-vec4 city(vec3 p)
-{
-    p.y-=0.3;
-    obj_id=CITY_MENGER;
-    vec2 flp=floor(p.xz);
-    vec2 frp=fract(p.xz);
-    
-    frp-=0.5;
-    
-    vec2 rand;
-    rand=hash22(flp);
-    float height=0.4+rand.x*rand.x*1.7;
-    float d0=box(vec3(frp.x,p.y,frp.y),vec3(0.1,height,.4));   
-    
-    vec4 res=vec4(d0, 1.0, 0.0, 0.0);
-    
-    // menger spone from iq
-    // larger value gives higher density of rooms
-    // I like 1.1, 1.2, 1.7
-    float s=1.+.2*rand.y*(1.-step(1.6,height)); 
-    vec3 q=p;
-    for(int m=0; m<4; m++)
-    {      
-        p.y+=rand.y;
-        vec3 a=mod(p*s, 2.0)-1.0;
-        s*=3.;
-        vec3 r=abs(1. - 3.0*abs(a));
-        float da=max(r.x,r.y);
-        float db=r.y;//max(r.y,r.z);
-        float dc=max(r.z,r.x);
-        float c=(min(da,min(db,dc))-1.)/s;
-
-        if(c>d0)
-        {
-          d0=c;
-          res=vec4(d0, min(res.y,.2*da*db*dc), (1.0+float(m))/4.0, 0. );
-        }
-    }
-   
-    if(q.y<res.x){obj_id=CITY_ROAD;res.x=q.y;}
-    return res;
-}
-
-
-vec3 get_city_normal(vec3 p)
-{
-    vec3 e=vec3(0.001,0.,0.);
-    return normalize(vec3(city(p+e.xyy).x-city(p-e.xyy).x,
-                 city(p+e.yxy).x-city(p-e.yxy).x,
-                 city(p+e.yyx).x-city(p-e.yyx).x));
-}
-
-
-#define CITY_ITER 250
-#define CITY_FAR 50.
-
-vec4 intersect_city_voxel(vec3 ro, vec3 rd)
-{
-    vec4 h=vec4(100.),res=vec4(-1);
-    float t = 0.05;
-    vec3 p=vec3(0.0);
-
-    for (int i=0; i<CITY_ITER; i++)
-    {
-        if(h.x<0.0001+0.000125*t||t>CITY_FAR)
-        {
-            continue;
-        }
-        p=ro+rd*t;
-
-        h=city(p);
-
-        // 2d voxel marching the city blocks, as the boundaries are not continues
-        
-        float dx=-fract(p.x);
-        if (rd.x>0.) 
-            dx=fract(-p.x);
-        
-        float dz=-fract(p.z);
-        if (rd.z>0.)
-            dz=fract(-p.z);
-        
-        float nearest=min(fract(dx/rd.x), fract(dz/rd.z))+VOXEL_GAP;
-        nearest=max(VOXEL_GAP, nearest);
-        
-        t+= min(h.x, nearest); 
-        res=vec4(t,h.yzw);
-        
-    }
-    return res;
-}
-
-vec3 material_city(vec3 p, float night)
-{
-    vec3 col=vec3(0.4,0.6,1.0)*0.15;
-    vec4 res=city(p);
-    if(obj_id==CITY_MENGER)
-    {
-        res.z=1.-res.z;
-        col=(1.2*(1.-night)+0.8)* vec3(.5+res.z*res.z,.3+pow(res.z, 3.), res.z*res.z*0.9);
-        //col=vec3(res.z);  
-
-        if(night>0.5)
-        {
-            if(res.z<.25)
-                col=50.*vec3(1.2,0.3,0.);
-            else if(res.z<0.75)
-                col*=6.;
-        }
-        
-    }
-    else
-    {
-        p.z-=iTime*2.;
-        col+=(1.-smoothstep(0.01,0.025,abs(abs(p.x)-.25)))*vec3(1);
-        col=mix(col,vec3(1.2,0.7,0.),floor(fract(p.z)+.5)*(1.-smoothstep(0.01,0.02,abs(p.x)-0.001)));//*vec3(1);
-        // fake shadow
-        col*=(0.06+smoothstep(0.4,0.6,abs(abs(p.x+0.13)-0.7))); 
-        col*=(0.06+smoothstep(0.4,0.6,-p.x+1.47))*vec3(1); 
-    }
-    return col;
-}
-
-vec3 city_bg(vec3 ro, vec3 rd, float night)
-{
-    const vec3 moon_col=vec3(0.8,1.,1.);
-    const vec3 moon_dir=vec3(0,0,-1.);    
-    vec3 col;
-    
-    col=vec3(1.)-moon_col*smoothstep(-.1,0.,rd.y)*smoothstep(0.33,0.37,pow(max(dot(moon_dir, rd), 0.0), 32.0));
-
-    if(night>0.)
-        col=vec3(0.)+vec3(0.3,0.,0.)*smoothstep(-.1,0.,rd.y)*smoothstep(0.33,0.37,pow(max(dot(moon_dir, rd), 0.0), 32.0));
-    
-    return col;
-}
-
-
-float curve(in vec3 p, in float w)
-{
-    vec2 e=vec2(-1., 1.)*w;
-    
-    float t1=city(p+e.yxx).x, t2=city(p+e.xxy).x;
-    float t3=city(p+e.xyx).x, t4=city(p+e.yyy).x;
-    
-    return 0.0125/(w*w)*(t1+t2+t3+t4-4.*city(p).x);
-}
-
-vec4 render_city(vec3 ro, vec3 rd, float night)
-{
-    vec4 res=intersect_city_voxel(ro,rd);
-    vec3 col=city_bg(ro,rd,night);
-
-    if(res.x<CITY_FAR)
-    {
-       // if(city(ro+res.x*rd).x>0.005/res.x)
-         //   res.x=res.w;
-        vec3 pos=ro+res.x*rd;
-        vec3 nor=get_city_normal(pos);
-        vec3 l1dir=normalize(vec3(1.0,2.,-1.));
-        vec3 l1col=vec3(1.2,0.8,0.5);
-        
-        float ao=res.y*res.y;
-        if(obj_id==CITY_ROAD)
-            ao=1.;
-
-        vec3 mate=material_city(pos,night);
-        float dif=max(0.0,dot(nor,l1dir));
-        float bac=max(0.0,dot(nor,-l1dir));
-        float sky=0.5+0.5*nor.y;
-        float spe=pow(max(dot(reflect(-l1dir, nor), -rd), 0.0), 16.0);
-        float crv=clamp(1.-abs(curve(pos,0.0015)),0.,1.);
-
-        vec3 lin=4.0*(1.-night)*dif*l1col*ao;
-        lin+=3.*sky*vec3(0.1,0.2,0.5)*ao;
-        lin+=1.*bac*l1col*ao;
-        lin+=1.*spe*vec3(1.);
-        col=lin*crv*0.2*mate;
-        
-        vec3 skycol=vec3(1.-night);
-        if(rd.z<0.)
-            col=mix(col,vec3(.15,0,0),1.-exp(-0.005*res.x*res.x));
-        else col=mix(col,skycol,1.-exp(-0.001*res.x*res.x));
-       //col=vec3(lin);
-    }
-    return vec4(col,res.x);
-}
-
-
-vec3 tonemap(vec3 x) 
-{
-    const float a=2.51;
-    const float b=0.03;
-    const float c=2.43;
-    const float d=0.59;
-    const float e=0.14;
-    return (x * (a * x + b)) / (x * (c * x + d) + e);
-}
-
-
-void mainImage( out vec4 fragColor, in vec2 fragCoord )
-{
-    vec2 q=fragCoord/iResolution.xy;
-    vec2 p=q*2.-1.;
-    p.x*=iResolution.x/iResolution.y;
-    pixel_size=1.0/(iResolution.y);
-   
-     // debugging camera
-    //float x_rot=-iMouse.x/iResolution.x*PI*2.0;
-    //float y_rot=iMouse.y/iResolution.y*3.14*0.5 + PI/2.0;
-    //vec3 ro=vec3(0.,0.9,-2.*iTime)+vec3(cos(y_rot)*cos(x_rot),0.,cos(y_rot)*sin(x_rot))*10.;
-    //vec3 ta=vec3(0.,0.,-2.*iTime);
-   
-    float time=mod(iTime,40.);
-    vec3 ro,ro2;
-    if(time < 20.)
-    {
-        ro=vec3(0.,.9,-9.);
-        ro2=ro;
-        
-        if(time>10.)
-        {
-            ro.xz*=rot(-(time-10.)*0.07);
-        }
-    }
-    else
-    {
-        ro=vec3(0.,.9,9.);
-        ro2=ro;
-    }
-
-    ro.z-=2.*iTime;
-    ro2.z-=2.*iTime;
-    vec3 ta=vec3(0.,0.,-2.*iTime);
-    
-    
-    vec3 f=normalize(ta-ro);
-    vec3 r=normalize(cross(f,vec3(0.,1.,0.)));
-    vec3 u=normalize(cross(r,f));
-    
-    vec3 rd=normalize(r*p.x + u*p.y + f*2.3);
-    
-    vec3 timetunnel=tunnel(rd,-iTime*8.,.05);
-    vec3 menger=render_city(ro2,rd, 1.0-step(0.0,sin(0.05*(iTime+40.-14.)))).xyz;
-    
-    vec3 bg=mix(timetunnel,menger,1.-smoothstep(0.,1.,sin(0.1*(iTime+40.))));
-    vec3 col=render_doraemon(ro,rd,bg);
-    
-    // post processing
-    col=tonemap(col);
-    col=pow(clamp(col,0.,1.0),vec3(0.45));
-    col*=0.5+0.5*pow(16.0*q.x*q.y*(1.0-q.x)*(1.0-q.y),0.7);
-    fragColor=vec4(col,1.);
-}
-// --------[ Original ShaderToy ends here ]---------- //
-
-
-void main(void)
-{
-    iTime = time/2000;        //Shader timer
-    nTime = (time-7700)/1500; //Texttimer - diff
-    iResolution = vec3(resolution, 0.0);
-
-    mainImage(gl_FragColor, gl_FragCoord.xy);
-
-	vec2 uv = ( gl_FragCoord.xy/resolution.xy ) -.2;
-	uv.x*=resolution.x/resolution.y;
-	vec3 col = gl_FragColor.xyz;
-
-    if (time > 7700)
-    {
-	    if (uv.y > -0.4) 
-	    {
-		    vec3 copper = copper(vec3(uv.y*4.-nTime*.4,.3,.4));
-            float text = scroll(uv)+scroll(uv*vec2(2.,-1.)-vec2(0.,.68))*.5;
-		    col = text > 0. ? vec3(.5)*text*copper : col;
-	    }
-    }
-	gl_FragColor = vec4(col,1.);
+	uv = gl_FragCoord.xy / DOWN_SCALE;
+	vec2 duv = floor(gl_FragCoord.xy / DOWN_SCALE);
+    duv.y = duv.y +50;
+	vec3 pixel = Text(duv);
+	vec3 col = pixel*1.9+0.1;
+	//col *= (1.-distance(mod(uv,vec2(1.0)),vec2(0.65)))*1.2;
+	
+	gl_FragColor += vec4(vec3(col), 1.0);
 }
