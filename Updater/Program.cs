@@ -176,6 +176,7 @@ void main(void)
             }
 
             WebClient Client = new WebClient();
+            Client.CachePolicy = new System.Net.Cache.RequestCachePolicy(System.Net.Cache.RequestCacheLevel.NoCacheNoStore);
             var x = Client.OpenRead("https://raw.githubusercontent.com/GiR-Zippo/Updater/main/Updater/Data/Tune.info");
             StreamReader sr = new StreamReader(x);
             string file = sr.ReadToEnd();
