@@ -256,6 +256,7 @@
     <Content Include="Data\Shader.frag">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <None Include="Data\Tune.info" />
     <None Include="libraries\freeglut.dll.config" />
     <None Include="libraries\OpenGL.dll.config" />
     <None Include="libraries\Tao.FreeGlut.dll.config" />
