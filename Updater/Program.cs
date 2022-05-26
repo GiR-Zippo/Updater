@@ -52,9 +52,11 @@ void main(void)
 
         static void Main(string[] args)
         {
-            var datas = ReadConfig(false);
+            bool debug = false;
+            var datas = ReadConfig(debug);
 
-            CheckVersion();
+            if (!debug)
+                CheckVersion();
 
             m_Player = new MikMod();
             ModDriver.Mode = (ushort)(ModDriver.Mode | SharpMikCommon.DMODE_NOISEREDUCTION);
@@ -223,10 +225,20 @@ void main(void)
                 //Check the versions
                 if (version != null)
                 {
-                    if (version != gitversion)
+                    if (version == gitversion)
                     {
-                        Process.Start("FFBardMusicPlayer.exe");
-                        Environment.Exit(0);
+                        MessageBoxResult result = MessageBox.Show("Your version is up to date\r\nLauch it now?", "Updater", MessageBoxButton.YesNo);
+                        switch (result)
+                        {
+                            case MessageBoxResult.OK:
+                                try { Process.Start("FFBardMusicPlayer.exe"); }
+                                catch { };
+                                Environment.Exit(0);
+                                break;
+                            case MessageBoxResult.No:
+                                break;
+                        }
+                        return;
                     }
                 }
             }
