@@ -253,7 +253,9 @@
     <Content Include="icon.ico" />
     <Content Include="iconp.ico" />
     <None Include="App.config" />
-    <None Include="Data\4mat-truck_is_jarig.xm" />
+    <None Include="Data\4mat-truck_is_jarig.xm">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="Data\4mat_-_broken_heart.xm" />
     <Content Include="Data\grookles_chips.xm">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

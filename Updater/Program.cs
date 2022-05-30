@@ -52,7 +52,7 @@ void main(void)
 
         static void Main(string[] args)
         {
-            bool debug = false;
+            bool debug = true;
             var datas = ReadConfig(debug);
 
             if (!debug)
@@ -71,6 +71,7 @@ void main(void)
                 Console.WriteLine(ex);
             }
             m_Mod = m_Player.LoadModule(datas.Value);
+            m_Mod.wrap = true;
             string FragmentShader = datas.Key;
 
             // create an OpenGL window
@@ -170,8 +171,8 @@ void main(void)
 
             if (debug)
             {
-                modfile = @"Data\80616-industrial.xm";
-                shader = File.ReadAllText(@"Data\Shader.frag");
+                modfile = @"Data\grookles_chips.xm";
+                shader = File.ReadAllText(@"Data\Shader158.frag");
                 return new KeyValuePair<string, string>(shader, modfile);
             }
 
