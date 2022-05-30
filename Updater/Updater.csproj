@@ -263,10 +263,10 @@
     <Content Include="Data\Shader_test.frag">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="Data\Shader158.frag">
+    <Content Include="Data\Shader.frag">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="Data\Shader.frag">
+    <Content Include="Data\Shader157.frag">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <None Include="Data\80616-industrial.xm">
